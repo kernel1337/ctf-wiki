@@ -402,16 +402,15 @@ mem指向用户得到的内存的起始位置。
 /* Normal bins packed as described above */
 mchunkptr bins[ NBINS * 2 - 2 ];
 ```
-
-一个bin相当于一个chunk链表，我们把每个链表的头节点chunk作为bins数组，但是由于这个头节点作为bin表头，其prev_size 与 size 字段是没有任何实际作用的，因此我们在存储头节点chunk的时候仅仅只需要存储头节点chunk的fd和bk即可，而其中的prev_size 与 size 字段被重用为另一个bin的头节点的fd与bk，这样可以节省空间，并提高可用性。因此**我们仅仅只需要mchunkptr类型的指针数组就足够存储这些头节点**，那prev_size 与 size 字段到底是怎么重用的呢？这里我们以32位系统为例
+`bins` 主要用于索引不同 bin 的 fd 和 bk。以 32 位系统为例，bins 前 4 项的含义如下
 
 | 含义    | bin1的fd/bin2的prev_size | bin1的bk/bin2的size | bin2的fd/bin3的prev_size | bin2的bk/bin3的size |
 | ----- | ---------------------- | ----------------- | ---------------------- | ----------------- |
 | bin下标 | 0                      | 1                 | 2                      | 3                 |
 
-可以看出除了第一个bin（unsorted bin）外，后面的每个bin的表头chunk会重用前面的bin表头chunk的fd与bk字段，将其视为其自身的prev_size和size字段。这里也说明了一个问题，**bin的下标和我们所说的第几个bin并不是一致的。同时，bin表头的 chunk 头节点 的 prev_size 与 size 字段不能随便修改，因为这两个字段是其它bin表头chunk的fd和bk字段。**
+可以看到，bin2 的 prev_size、size 和 bin1 的 fd、bk 是重合的。由于我们只会使用 fd 和 bk 来索引链表，所以该重合部分的数据其实记录的是 bin1 的 fd、bk。 也就是说，虽然后一个 bin 和前一个 bin 共用部分数据，但是其实记录的仍然是前一个 bin 的链表数据。通过这样的复用，可以节省空间。
 
-数组中的 bin 依次介绍如下
+数组中的 bin 依次如下
 
 1. 第一个为 unsorted bin，字如其面，这里面的 chunk 没有进行排序，存储的 chunk 比较杂。
 2. 索引从 2 到 63 的 bin 称为 small bin，同一个 small bin 链表中的 chunk 的大小相同。两个相邻索引的 small bin 链表中的 chunk 大小相差的字节数为**2个机器字长**，即32位相差8字节，64位相差16字节。
@@ -859,7 +858,10 @@ typedef struct _heap_info
 - 堆对应的 arena 的地址
 - 由于一个线程申请一个堆之后，可能会使用完，之后就必须得再次申请。因此，一个线程可能会有多个堆。prev即记录了上一个 heap_info 的地址。这里可以看到每个堆的 heap_info 是通过单向链表进行链接的。
 - size 表示当前堆的大小
-- 最后一部分确保对齐（**这里负数使用的缘由是什么呢**？）
+- 最后一部分确保对齐
+
+!!! note "pad 里负数的缘由是什么呢？"
+    `pad` 是为了确保分配的空间是按照 `MALLOC_ALIGN_MASK+1` (记为 `MALLOC_ALIGN_MASK_1`) 对齐的。在 `pad` 之前该结构体一共有 6 个 `SIZE_SZ` 大小的成员, 为了确保  `MALLOC_ALIGN_MASK_1` 字节对齐, 可能需要进行 `pad`，不妨假设该结构体的最终大小为 `MALLOC_ALIGN_MASK_1*x`，其中 `x` 为自然数，那么需要 `pad` 的空间为 `MALLOC_ALIGN_MASK_1 * x - 6 * SIZE_SZ = (MALLOC_ALIGN_MASK_1 * x - 6 * SIZE_SZ) % MALLOC_ALIGN_MASK_1 = 0 - 6 * SIZE_SZ % MALLOC_ALIGN_MASK_1=-6 * SIZE_SZ % MALLOC_ALIGN_MASK_1 = -6 * SIZE_SZ & MALLOC_ALIGN_MASK`。
 
 看起来该结构应该是相当重要的，但是如果如果我们仔细看完整个 malloc 的实现的话，就会发现它出现的频率并不高。
 

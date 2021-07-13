@@ -4,7 +4,7 @@ site_author: CTF Wiki Team
 site_url: https://ctf-wiki.org/
 repo_name: ctf-wiki/ctf-wiki
 repo_url: https://github.com/ctf-wiki/ctf-wiki
-edit_uri: blob/master/docs/
+edit_uri: blob/master/docs/zh/docs/
 copyright: Copyright &copy; 2016 - 2021 CTF Wiki Team
 theme:
   name: material
@@ -32,12 +32,13 @@ plugins:
 nav:
 - Start:
   - index.md
-  - discussion.md
+  - usage.md
   - 贡献指南:
     - contribute/before-contributing.md
     - contribute/basic-contribute-approach.md
     - contribute/documentation-requirement.md
     - contribute/translation.md
+  - discussion.md
 - Introduction:
   - introduction/history.md
   - introduction/mode.md
@@ -298,6 +299,7 @@ nav:
       - pwn/linux/glibc-heap/house_of_orange.md
       - pwn/linux/glibc-heap/house_of_rabbit.md
       - pwn/linux/glibc-heap/house_of_roman.md
+      - pwn/linux/glibc-heap/house_of_pig.md
     - IO_FILE 利用:
       - pwn/linux/io_file/introduction.md
       - pwn/linux/io_file/fake-vtable-exploit.md
@@ -310,6 +312,7 @@ nav:
       - pwn/linux/integeroverflow/intof.md
     - 沙箱逃逸:
       - pwn/linux/sandbox/python-sandbox-escape.md
+      - pwn/linux/sandbox/c-sandbox-escape.md
     - kernel:
       - pwn/linux/kernel/environment.md
       - pwn/linux/kernel/basic_knowledge.md
@@ -360,6 +363,31 @@ nav:
   - ics/discover.md
   - ics/exploit.md
   - ics/learn.md
+- BlockChain:
+  - blockchain/introduction.md
+  - Ethereum Security:
+    - blockchain/ethereum/introduction.md
+    - blockchain/ethereum/basics.md
+    - blockchain/ethereum/selector-encoding.md
+    - blockchain/ethereum/storage.md
+    - blockchain/ethereum/opcodes.md
+    - Known Attacks:
+      - blockchain/ethereum/attacks/introduction.md
+      - blockchain/ethereum/attacks/re-entrancy.md
+      - blockchain/ethereum/attacks/overflow-underflow.md
+      - blockchain/ethereum/attacks/randomness.md
+      - blockchain/ethereum/attacks/airdrop-hunting.md
+      - blockchain/ethereum/attacks/shortaddress.md
+      - blockchain/ethereum/attacks/delegatecall.md
+      - blockchain/ethereum/attacks/uninitialized-storage-pointer.md
+      - blockchain/ethereum/attacks/arbitrarywrite.md
+      - blockchain/ethereum/attacks/create2.md
+      - blockchain/ethereum/attacks/jump-oriented-programming.md
+    - blockchain/ethereum/reverse.md
+    - blockchain/ethereum/challenges.md
+    - blockchain/ethereum/resources.md
+  - Public Blockchain Security:
+    - blockchain/publicblockchain/introduction.md
 markdown_extensions:
 - admonition
 - md_in_html
