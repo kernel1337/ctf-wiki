@@ -1,4 +1,4 @@
-# Agent Loop
+# Naive Agent Loop
 
 ## 简介
 
@@ -422,7 +422,7 @@ class Agent:
             step += 1
 ```
 
-#### 5. 调用 Agent Loop
+#### 6. 调用 Agent Loop
 
 最后就是在主函数中解析配置文件并调用 Agent Loop 了，因为前面我们已经完成了绝大部分工作所以这里直接调用我们封装好的接口把参数传进去即可：
 
@@ -458,7 +458,7 @@ def main(argv):
     )
 ```
 
-#### 6. 参数与配置管理
+#### 7. 参数与配置管理
 
 以及我们需要一份单独的配置文件，方便后续进行模型信息等的修改，这里笔者选择使用 JSON 格式编写配置文件，方便后续管理，以下是一个示例：
 
@@ -511,7 +511,7 @@ def parse_args(argv) -> tuple[AgentConfig, bool]:
         return AgentConfig.load(args.config), True
 ```
 
-#### 7. 实战：利用 Naive Agent Loop 解决简单的 CTF 题目
+#### 8. 实战：利用 Naive Agent Loop 解决简单的 CTF 题目
 
 这里我们以 `[强网杯 2019]随便注` 这道题目作为我们的自动化测试的例子。测试平台选择 [https://ctf2.dasctf.com/](https://ctf2.dasctf.com/) 。我们首先在平台上启动这道题的靶机，然后将靶机地址作为初始输入给到我们的 Agent Loop，选取 DeepSeek 官网的 `deepseek-v4-pro` 模型（2026 年发布的 DeepSeek-V4-Pro） 作为我们的基模，得到如下自动化解题过程：
 
